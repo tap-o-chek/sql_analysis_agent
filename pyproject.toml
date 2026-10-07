@@ -1,0 +1,17 @@
+[project]
+name = "sqlagent"
+version = "0.1.0"
+description = "Агент для аналитики по таблицам: text-to-SQL с самоисправлением на LangGraph"
+requires-python = ">=3.11"
+dependencies = [
+    "faker>=30",
+    "langgraph>=0.2",
+    "langchain-ollama>=0.2",
+    "sqlglot>=25",
+    "pandas>=2.2",
+    "streamlit>=1.38",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

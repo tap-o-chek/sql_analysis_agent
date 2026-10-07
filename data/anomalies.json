@@ -1,0 +1,96 @@
+{
+  "note": "Аномалии, специально заложенные генератором (seed=42). Ground truth для оценки.",
+  "collection_shortages": {
+    "route_id": 10,
+    "route_name": "КЗН-2",
+    "since": "2025-06-01",
+    "description": "С 01.06.2025 ~35% выездов маршрута с недостачей 5–50 тыс. ₽"
+  },
+  "split_purchases": {
+    "supplier_id": 7,
+    "supplier_name": "ЗАО «Пестова Ершова»",
+    "supplier_registered_at": "2025-03-03",
+    "branch_id": 12,
+    "contract_ids": [
+      133,
+      135,
+      141,
+      143,
+      145,
+      157,
+      161
+    ],
+    "total_amount": 3385800,
+    "description": "7 договоров «Ремонт помещений» по 470–499 тыс. ₽ без конкурса (порог 500 000 ₽) за несколько недель"
+  },
+  "duplicate_invoices": [
+    {
+      "original_invoice_id": 366,
+      "duplicate_invoice_id": 367,
+      "invoice_number": "СЧ-038-0003",
+      "contract_id": 199,
+      "amount": 131500
+    },
+    {
+      "original_invoice_id": 433,
+      "duplicate_invoice_id": 437,
+      "invoice_number": "СЧ-034-0004",
+      "contract_id": 211,
+      "amount": 251200
+    },
+    {
+      "original_invoice_id": 533,
+      "duplicate_invoice_id": 536,
+      "invoice_number": "СЧ-022-0011",
+      "contract_id": 291,
+      "amount": 123000
+    },
+    {
+      "original_invoice_id": 666,
+      "duplicate_invoice_id": 678,
+      "invoice_number": "СЧ-022-0013",
+      "contract_id": 291,
+      "amount": 105700
+    },
+    {
+      "original_invoice_id": 706,
+      "duplicate_invoice_id": 712,
+      "invoice_number": "СЧ-048-0010",
+      "contract_id": 390,
+      "amount": 626500
+    },
+    {
+      "original_invoice_id": 770,
+      "duplicate_invoice_id": 771,
+      "invoice_number": "СЧ-030-0006",
+      "contract_id": 319,
+      "amount": 270300
+    }
+  ],
+  "dirty_values": {
+    "city_variants": {
+      "Москва": [
+        "г. Москва",
+        "москва"
+      ],
+      "Санкт-Петербург": [
+        "СПб",
+        "Санкт-Петербург "
+      ],
+      "Казань": [
+        "г. Казань"
+      ],
+      "Екатеринбург": [
+        "г. Екатеринбург",
+        "Екатеринбург "
+      ],
+      "Новосибирск": [
+        "г. Новосибирск"
+      ],
+      "Нижний Новгород": [
+        "Н. Новгород"
+      ]
+    },
+    "description": "atms.city и suppliers.city в ~15% строк записаны иначе, чем branches.city"
+  }
+}
