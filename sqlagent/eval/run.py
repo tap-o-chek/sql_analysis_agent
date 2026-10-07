@@ -79,6 +79,7 @@ def evaluate(q: dict, state: dict, conn: sqlite3.Connection) -> dict:
         "facts_ok": facts_present(answer, q["key_facts"]) if q.get("key_facts") else None,
         "unsupported_numbers": unsupported,
         "llm_calls": len(llm_steps),
+        "review_parse_errors": sum(bool(s.get("parse_error")) for s in trace),
         "tokens_in": sum(s.get("tokens", {}).get("in", 0) for s in llm_steps),
         "tokens_out": sum(s.get("tokens", {}).get("out", 0) for s in llm_steps),
         "answer": answer,

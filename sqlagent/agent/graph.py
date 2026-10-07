@@ -15,18 +15,18 @@ LLM делает две вещи: пишет SQL и оценивает резу�
 (одна LLM пишет SQL и отвечает) — это бейзлайн для сравнения.
 """
 
-import json
 import operator
 import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Annotated, Callable, TypedDict
+from typing import Annotated, Callable, Literal, TypedDict
 
 import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
 
 from sqlagent import checks, config
 from sqlagent.agent import prompts
@@ -51,6 +51,17 @@ class AgentState(TypedDict, total=False):
     trace: Annotated[list[dict], operator.add]      # шаги агента для CLI/UI
 
 
+class Review(BaseModel):
+    """Структурированный ответ проверки результата. Схема уходит в Ollama, и модель генерирует
+    JSON строго по ней (constrained decoding). Порядок полей важен: модель сначала разбирает
+    условия и ищет проблемы и только потом выносит вердикт и пишет ответ."""
+    conditions: list[str] = Field(description="Условия из вопроса: что посчитать, период, фильтры, порядок")
+    problems: list[str] = Field(description="Что в SQL не соответствует условиям; пусто, если всё верно")
+    verdict: Literal["ok", "revise"]
+    reason: str = Field(default="", description="При revise: что исправить в запросе")
+    answer: str = Field(default="", description="При ok: ответ пользователю по-русски")
+
+
 def extract_sql(text: str) -> str:
     m = re.search(r"```(?:sql)?\s*(.*?)```", text, re.S | re.I)
     return (m.group(1) if m else text).strip().rstrip(";").strip()
@@ -69,11 +80,13 @@ def format_history(history: list[dict]) -> str:
 
 def build_graph(model: str = config.MODEL, review_model: str | None = None,
                 db_path: Path = config.DB_PATH, max_attempts: int = config.MAX_ATTEMPTS,
-                keep_alive: str | None = config.KEEP_ALIVE, llm=None, llm_json=None):
-    """llm / llm_json можно подменить (например, заглушкой в тестах)."""
+                keep_alive: str | None = config.KEEP_ALIVE, llm=None, review_llm=None):
+    """llm / review_llm можно подменить (например, заглушкой в тестах)."""
     common = dict(base_url=config.OLLAMA_URL, temperature=0, num_ctx=config.NUM_CTX, keep_alive=keep_alive)
     llm = llm or ChatOllama(model=model, **common)
-    llm_json = llm_json or ChatOllama(model=review_model or config.REVIEW_MODEL, format="json", **common)
+    review_llm = review_llm or ChatOllama(model=review_model or config.REVIEW_MODEL, **common)
+    # include_raw: кроме разобранного Review получаем сырой ответ (для токенов) и ошибку разбора, если была
+    reviewer = review_llm.with_structured_output(Review, method="json_schema", include_raw=True)
     with closing(connect(db_path)) as conn:
         schema = describe_schema(conn)
         columns = table_columns(conn)
@@ -137,16 +150,14 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
             preview=preview, warnings="\n".join(f"- {w}" for w in state["warnings"]) or "нет")
         if state.get("answer_feedback"):
             user += prompts.ANSWER_FEEDBACK.format(numbers=state["answer_feedback"])
-        system = prompts.REVIEW_SYSTEM.replace("{schema}", schema)  # не .format: в промпте есть JSON со скобками
-        reply = llm_json.invoke([SystemMessage(system), HumanMessage(user)])
-        raw, tokens = reply.content, usage(reply)
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = {"verdict": "ok", "answer": raw}
-        verdict = "revise" if parsed.get("verdict") == "revise" else "ok"
-        reason = str(parsed.get("reason") or "").strip()
-        answer = str(parsed.get("answer") or "").strip()
+        out = reviewer.invoke([SystemMessage(prompts.REVIEW_SYSTEM.format(schema=schema)), HumanMessage(user)])
+        tokens = usage(out["raw"])
+        review: Review | None = out["parsed"]
+        if review is None:  # ответ не прошёл валидацию по схеме — не притворяемся, что проверка была
+            return {"verdict": "accept", "answer": "Результат в таблице (не удалось сформировать текстовый ответ).",
+                    "trace": [{"step": "review", "text": f"Ответ проверки не разобран: {out['parsing_error']}",
+                               "ok": False, "parse_error": True, "tokens": tokens}]}
+        verdict, reason, answer = review.verdict, review.reason.strip(), review.answer.strip()
 
         if verdict == "revise" and can_retry(state):
             return {"verdict": "revise", "answer_feedback": None,

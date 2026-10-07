@@ -51,6 +51,7 @@ def summary(recs: list[dict]) -> dict[str, str]:
         "Токенов в среднем (вход + выход)": f"{statistics.mean(r['tokens_in'] + r['tokens_out'] for r in recs):,.0f}".replace(",", " "),
         "Время p50 / p95, с": f"{percentile(latencies, 0.5):.1f} / {percentile(latencies, 0.95):.1f}",
         "Время на один правильный ответ, с": f"{sum(latencies) / n_correct:.1f}" if n_correct else "—",
+        "Ответ проверки не прошёл схему": str(sum(r.get("review_parse_errors", 0) for r in recs)),
         "Упавшие прогоны": str(sum(bool(r["error"]) for r in recs)),
     }
 
