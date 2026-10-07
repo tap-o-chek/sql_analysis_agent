@@ -1,6 +1,7 @@
 """Граф агента на LangGraph.
 
-    generate_sql → execute ──ошибка──────────────────────────→ generate_sql (или give_up)
+    generate_sql ──CANNOT_ANSWER (нет данных / просят изменить базу)──→ END
+         └→ execute ──ошибка──────────────────────────→ generate_sql (или give_up)
                       └─ok→ inspect_filters ──фильтр теряет строки→ generate_sql
                                   └─ok→ check_result → review ──revise→ generate_sql
                                                           └─ok→ verify_answer ──число не из таблицы→ review
@@ -46,6 +47,7 @@ class AgentState(TypedDict, total=False):
     answer: str
     answer_feedback: str | None                     # какие числа в ответе не нашлись в результате
     answer_retries: int
+    refused: bool                                   # агент отказался отвечать (нет данных или опасный запрос)
     trace: Annotated[list[dict], operator.add]      # шаги агента для CLI/UI
 
 
@@ -54,16 +56,24 @@ def extract_sql(text: str) -> str:
     return (m.group(1) if m else text).strip().rstrip(";").strip()
 
 
+def usage(reply) -> dict:
+    """Токены из ответа Ollama — для метрик стоимости."""
+    u = getattr(reply, "usage_metadata", None) or {}
+    return {"in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0)}
+
+
 def format_history(history: list[dict]) -> str:
     return "\n\n".join(f"Попытка {i}:\n```sql\n{h['sql']}\n```\nПроблема: {h['problem']}"
                        for i, h in enumerate(history, 1))
 
 
 def build_graph(model: str = config.MODEL, review_model: str | None = None,
-                db_path: Path = config.DB_PATH, max_attempts: int = config.MAX_ATTEMPTS):
-    llm = ChatOllama(model=model, base_url=config.OLLAMA_URL, temperature=0, num_ctx=config.NUM_CTX)
-    llm_json = ChatOllama(model=review_model or config.REVIEW_MODEL, base_url=config.OLLAMA_URL, temperature=0,
-                          num_ctx=config.NUM_CTX, format="json")
+                db_path: Path = config.DB_PATH, max_attempts: int = config.MAX_ATTEMPTS,
+                keep_alive: str | None = config.KEEP_ALIVE, llm=None, llm_json=None):
+    """llm / llm_json можно подменить (например, заглушкой в тестах)."""
+    common = dict(base_url=config.OLLAMA_URL, temperature=0, num_ctx=config.NUM_CTX, keep_alive=keep_alive)
+    llm = llm or ChatOllama(model=model, **common)
+    llm_json = llm_json or ChatOllama(model=review_model or config.REVIEW_MODEL, format="json", **common)
     with closing(connect(db_path)) as conn:
         schema = describe_schema(conn)
         columns = table_columns(conn)
@@ -78,10 +88,17 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
         if state.get("history"):
             user += "\n\n" + prompts.SQL_RETRY.format(history=format_history(state["history"]))
         reply = llm.invoke([SystemMessage(prompts.SQL_SYSTEM.format(schema=schema)), HumanMessage(user)])
-        sql = extract_sql(reply.content)
         attempt = state.get("attempts", 0) + 1
+        refusal = re.search(r"CANNOT_ANSWER:?\s*(.*)", reply.content, re.S)
+        if refusal:
+            reason = refusal.group(1).strip() or "в базе нет нужных данных"
+            return {"refused": True, "attempts": attempt, "answer": f"Не могу ответить по этой базе: {reason}",
+                    "trace": [{"step": "generate_sql", "text": f"Отказ: {reason}", "ok": False,
+                               "tokens": usage(reply)}]}
+        sql = extract_sql(reply.content)
         return {"sql": sql, "attempts": attempt, "error": None, "result": None,
-                "trace": [{"step": "generate_sql", "text": f"Попытка {attempt}: пишу SQL", "sql": sql}]}
+                "trace": [{"step": "generate_sql", "text": f"Попытка {attempt}: пишу SQL", "sql": sql,
+                           "tokens": usage(reply)}]}
 
     def execute(state: AgentState) -> dict:
         sql = state["sql"]
@@ -92,7 +109,7 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
         except (SQLValidationError, sqlite3.Error) as e:
             update = {"error": str(e), "trace": [{"step": "execute", "text": f"Ошибка: {e}", "ok": False}]}
             if can_retry(state):
-                update["history"] = [{"sql": sql, "problem": f"Ошибка выполнения: {e}"}]
+                update["history"] = [{"sql": sql, "problem": f"Ошибка выполнения: {e}", "source": "execute"}]
             return update
         return {"result": df, "truncated": truncated,
                 "trace": [{"step": "execute", "text": f"Выполнено: {len(df)} строк", "ok": True}]}
@@ -104,7 +121,7 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
                   "trace": [{"step": "inspect_filters",
                              "text": "\n".join(issues) or "Текстовые фильтры совпадают с данными", "ok": not issues}]}
         if issues and can_retry(state):
-            update["history"] = [{"sql": state["sql"], "problem": " ".join(issues)}]
+            update["history"] = [{"sql": state["sql"], "problem": " ".join(issues), "source": "inspect_filters"}]
         return update
 
     def check_result(state: AgentState) -> dict:
@@ -121,7 +138,8 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
         if state.get("answer_feedback"):
             user += prompts.ANSWER_FEEDBACK.format(numbers=state["answer_feedback"])
         system = prompts.REVIEW_SYSTEM.replace("{schema}", schema)  # не .format: в промпте есть JSON со скобками
-        raw = llm_json.invoke([SystemMessage(system), HumanMessage(user)]).content
+        reply = llm_json.invoke([SystemMessage(system), HumanMessage(user)])
+        raw, tokens = reply.content, usage(reply)
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
@@ -132,12 +150,12 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
 
         if verdict == "revise" and can_retry(state):
             return {"verdict": "revise", "answer_feedback": None,
-                    "history": [{"sql": state["sql"], "problem": f"Проверка результата: {reason}"}],
-                    "trace": [{"step": "review", "text": f"Нужно исправить: {reason}", "ok": False}]}
+                    "history": [{"sql": state["sql"], "problem": f"Проверка результата: {reason}", "source": "review"}],
+                    "trace": [{"step": "review", "text": f"Нужно исправить: {reason}", "ok": False, "tokens": tokens}]}
         if verdict == "revise":  # попытки кончились — отвечаем как есть, но честно предупреждаем
             answer = (answer + "\n\n" if answer else "") + f"⚠️ Результат может быть неточным: {reason}"
         return {"verdict": "accept", "answer": answer or "Результат в таблице.",
-                "trace": [{"step": "review", "text": "Результат принят, формирую ответ", "ok": True}]}
+                "trace": [{"step": "review", "text": "Результат принят, формирую ответ", "ok": True, "tokens": tokens}]}
 
     def verify_answer(state: AgentState) -> dict:
         bad = checks.unsupported_numbers(state["answer"], state["result"],
@@ -159,6 +177,9 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
 
     # ---------- переходы ----------
 
+    def after_generate(state: AgentState) -> str:
+        return END if state.get("refused") else "execute"
+
     def after_execute(state: AgentState) -> str:
         if state.get("error"):
             return "generate_sql" if can_retry(state) else "give_up"
@@ -177,7 +198,7 @@ def build_graph(model: str = config.MODEL, review_model: str | None = None,
     for node in (generate_sql, execute, inspect_filters, check_result, review, verify_answer, give_up):
         g.add_node(node.__name__, node)
     g.add_edge(START, "generate_sql")
-    g.add_edge("generate_sql", "execute")
+    g.add_conditional_edges("generate_sql", after_generate, ["execute", END])
     g.add_conditional_edges("execute", after_execute, ["generate_sql", "inspect_filters", "give_up"])
     g.add_conditional_edges("inspect_filters", after_inspect, ["generate_sql", "check_result"])
     g.add_edge("check_result", "review")

@@ -10,8 +10,14 @@ dependencies = [
     "sqlglot>=25",
     "pandas>=2.2",
     "streamlit>=1.38",
+    "pyyaml>=6.0.3",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

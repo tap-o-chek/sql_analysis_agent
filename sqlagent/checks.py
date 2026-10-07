@@ -24,7 +24,7 @@ def _norm(s: str) -> str:
 
 def _similar(value: str, pattern: str) -> bool:
     a, b = _norm(value), _norm(pattern)
-    if not b:
+    if not b or re.findall(r"\d+", a) != re.findall(r"\d+", b):  # 'КЗН-1' и 'КЗН-2' — разные коды
         return False
     return a == b or (len(b) >= 3 and (b in a or a in b)) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.8
 
